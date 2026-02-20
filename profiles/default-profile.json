@@ -1,0 +1,12 @@
+{
+  "source_dir": "pico-fido",
+  "pico_sdk_path": "",
+  "output_uf2": "openpicokeys-pico.uf2",
+  "board": "pico",
+  "key_name": "OpenPicoKeys",
+  "manufacturer": "OpenPicoKeys",
+  "website": "www.openpicokeys.local",
+  "usb_vid": "0x2E8A",
+  "usb_pid": "0x10FE",
+  "disable_led": false
+}
