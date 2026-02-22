@@ -23,7 +23,7 @@ class OpenPicoKeysApp(tk.Tk):
         self._worker: threading.Thread | None = None
         self._busy = False
 
-        default_source = str((Path.cwd() / "pico-fido").resolve())
+        default_source = str(FirmwareBuilder.default_source_dir())
 
         self.source_var = tk.StringVar(value=default_source)
         self.sdk_var = tk.StringVar(value="")
@@ -40,6 +40,7 @@ class OpenPicoKeysApp(tk.Tk):
         self._interactive_widgets: list[tk.Widget] = []
         self._build_ui()
         self.after(100, self._drain_events)
+        self.after(300, self._check_dependencies_on_startup)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
@@ -204,6 +205,8 @@ class OpenPicoKeysApp(tk.Tk):
                 self._set_busy(False)
             elif kind == "info":
                 messagebox.showinfo("OpenPicoKeys", payload)
+            elif kind == "startup_dep_check":
+                self.after(100, self._check_dependencies_on_startup)
 
         self.after(100, self._drain_events)
 
@@ -276,35 +279,32 @@ class OpenPicoKeysApp(tk.Tk):
             raise BuildError("Source path is required.")
         return profile
 
-    def _ensure_dependencies(self, for_build: bool) -> bool:
-        missing = FirmwareBuilder.missing_dependencies(for_build=for_build)
+    def _check_dependencies_on_startup(self) -> None:
+        if self._busy:
+            return
+        missing = FirmwareBuilder.missing_dependencies(for_build=True)
         if not missing:
-            return True
+            return
 
         dependency = missing[0]
         display_name = FirmwareBuilder.dependency_display_names().get(dependency, dependency)
-        action_name = "build firmware" if for_build else "prepare source"
         install_now = messagebox.askyesno(
             "Missing Dependency",
-            f"{display_name} is not installed, so OpenPicoKeys cannot {action_name}.\n\n"
+            f"{display_name} is required to build firmware.\n\n"
             f"Do you want OpenPicoKeys to auto-install {display_name} now?",
         )
         if not install_now:
-            return False
+            self.status_var.set(f"Missing dependency: {display_name}")
+            return
 
         def worker() -> None:
             builder = FirmwareBuilder(log_callback=lambda line: self._post("log", line))
             self._post("status", f"Installing {display_name}...")
             builder.install_dependency(dependency)
             self._post("success", f"{display_name} installed")
-            self._post(
-                "info",
-                f"{display_name} installation completed.\n\n"
-                "Run the action again to continue.",
-            )
+            self._post("startup_dep_check", "")
 
         self._start_background(worker)
-        return False
 
     def _save_profile(self) -> None:
         try:
@@ -349,8 +349,6 @@ class OpenPicoKeysApp(tk.Tk):
         self.status_var.set(f"Profile loaded: {source}")
 
     def _on_prepare_source(self) -> None:
-        if not self._ensure_dependencies(for_build=False):
-            return
         try:
             profile = self._collect_profile()
         except BuildError as exc:
@@ -368,8 +366,6 @@ class OpenPicoKeysApp(tk.Tk):
         self._start_background(worker)
 
     def _on_build(self) -> None:
-        if not self._ensure_dependencies(for_build=True):
-            return
         try:
             profile = self._collect_profile()
         except BuildError as exc:

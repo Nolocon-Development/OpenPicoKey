@@ -26,6 +26,7 @@ OpenPicoKeys provides a 3-step flow:
 
 - Python 3.10+
 - `cmake`
+- `ninja`
 - Pico toolchain required by upstream `pico-fido` build
 - Pico SDK is auto-downloaded and managed by OpenPicoKeys if `PICO_SDK_PATH` is not set
 
@@ -51,7 +52,7 @@ Current mapping:
 
 ## Dependency Prompts
 
-Before source preparation or firmware build, OpenPicoKeys checks required dependencies.
+On startup, OpenPicoKeys checks required build dependencies.
 If one is missing, the app prompts you and offers an auto-install action.
 
 OpenPicoKeys does not require `git`; upstream resources are downloaded as zip archives.

@@ -94,6 +94,19 @@ class FirmwareBuilder:
                     "--accept-source-agreements",
                 ]
             ],
+            "ninja": [
+                [
+                    "winget",
+                    "install",
+                    "--id",
+                    "Ninja-build.Ninja",
+                    "-e",
+                    "--source",
+                    "winget",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                ]
+            ],
             "arm-none-eabi-gcc": [
                 [
                     "winget",
@@ -113,13 +126,14 @@ class FirmwareBuilder:
     def dependency_display_names() -> dict[str, str]:
         return {
             "cmake": "CMake",
+            "ninja": "Ninja",
             "arm-none-eabi-gcc": "GNU Arm Embedded Toolchain",
         }
 
     @classmethod
     def required_dependencies(cls, for_build: bool) -> list[str]:
         if for_build:
-            return ["cmake", "arm-none-eabi-gcc"]
+            return ["cmake", "ninja", "arm-none-eabi-gcc"]
         return []
 
     @classmethod
@@ -595,15 +609,12 @@ class FirmwareBuilder:
             raise BuildError(f"PICO_SDK_PATH does not exist: {pico_sdk_path}")
         env["PICO_SDK_PATH"] = str(pico_sdk_path)
 
-        generator_args: list[str] = []
-        if shutil.which("ninja") is not None:
-            generator_args = ["-G", "Ninja"]
-
         try:
             self._run(
                 [
                     "cmake",
-                    *generator_args,
+                    "-G",
+                    "Ninja",
                     "-S",
                     str(source_dir),
                     "-B",

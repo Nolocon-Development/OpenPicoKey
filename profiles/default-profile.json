@@ -1,5 +1,5 @@
 {
-  "source_dir": "pico-fido",
+  "source_dir": "~/.openpicokeys/resources/pico-fido",
   "pico_sdk_path": "",
   "output_uf2": "openpicokeys-pico.uf2",
   "board": "pico",
