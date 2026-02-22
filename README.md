@@ -16,7 +16,7 @@ It is designed as an open alternative workflow to configure a Raspberry Pi Pico 
 OpenPicoKeys provides a 3-step flow:
 
 1. **Prepare Source**  
-   Clone (or reuse) `https://github.com/polhenarejos/pico-fido` and initialize `pico-keys-sdk` submodules.
+   Download (or reuse) pinned source archives for `pico-fido`, `pico-keys-sdk`, and required nested SDK components.
 2. **Customize Device Fields**  
    Set key name + website + other metadata in the GUI.
 3. **Build UF2**  
@@ -25,10 +25,9 @@ OpenPicoKeys provides a 3-step flow:
 ## Requirements
 
 - Python 3.10+
-- `git`
 - `cmake`
 - Pico toolchain required by upstream `pico-fido` build
-- Pico SDK available to build system (`PICO_SDK_PATH` env var or set in GUI)
+- Pico SDK is auto-downloaded and managed by OpenPicoKeys if `PICO_SDK_PATH` is not set
 
 ## Run
 
@@ -54,6 +53,8 @@ Current mapping:
 
 Before source preparation or firmware build, OpenPicoKeys checks required dependencies.
 If one is missing, the app prompts you and offers an auto-install action.
+
+OpenPicoKeys does not require `git`; upstream resources are downloaded as zip archives.
 
 ## License
 
