@@ -29,6 +29,9 @@ OpenPicoKeys provides a 3-step flow:
 - `ninja`
 - Pico toolchain required by upstream `pico-fido` build
 - Pico SDK is auto-downloaded and managed by OpenPicoKeys if `PICO_SDK_PATH` is not set
+- `python-fido2` is required for the Key Reader tab (auto-install prompt appears when needed)
+- `hidapi` is required on Windows for direct FIDO HID access in Key Reader (auto-install prompt appears when needed)
+- `cryptography` is required for encrypted backup/load in Key Reader (auto-install prompt appears when needed)
 
 ## Run
 
@@ -53,7 +56,21 @@ Current mapping:
 ## Dependency Prompts
 
 On startup, OpenPicoKeys checks required build dependencies.
-If one is missing, the app prompts you and offers an auto-install action.
+If any are missing, the app prompts once, auto-installs all missing dependencies, then restarts automatically.
+
+## Key Reader Backup/Load
+
+Key Reader supports:
+
+- `Backup Key(s)` with scope `Currently Selected Key` or `All-Keys`
+- encrypted backup containers (`.opkbackup`) using scrypt + AES-256-GCM
+- `Load Key(s)` with the same scopes
+
+Current limitation:
+
+- standard CTAP2 APIs do not provide full credential/private-key import.
+- `Load Key(s)` currently performs decrypted backup validation + target key PIN/access validation.
+- On some Windows systems, Pico FIDO devices can be detected via PnP fallback while direct CTAP HID open is blocked (`Access denied`).
 
 OpenPicoKeys does not require `git`; upstream resources are downloaded as zip archives.
 
