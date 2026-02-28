@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 
@@ -22,8 +23,10 @@ class BuildProfile:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "BuildProfile":
+        if not isinstance(payload, Mapping):
+            raise TypeError("Profile payload must be a JSON object.")
         # Ignore unknown keys to keep profile loading backward-compatible.
-        known = {f.name for f in cls.__dataclass_fields__.values()}
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in payload.items() if k in known}
         return cls(**filtered)
 

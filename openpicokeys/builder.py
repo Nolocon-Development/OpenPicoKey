@@ -71,7 +71,8 @@ class FirmwareBuilder:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        assert proc.stdout is not None
+        if proc.stdout is None:
+            raise BuildError("Failed to capture subprocess output.")
         for line in proc.stdout:
             self._log(line.rstrip())
         rc = proc.wait()
@@ -169,7 +170,7 @@ class FirmwareBuilder:
             return None
         try:
             return json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             return None
 
     @staticmethod
@@ -432,16 +433,6 @@ class FirmwareBuilder:
 
         led_path.write_text(patched, encoding="utf-8")
         return source
-
-    @staticmethod
-    def _find_uf2(build_dir: Path) -> Path:
-        direct = build_dir / "pico_fido.uf2"
-        if direct.exists():
-            return direct
-        candidates = sorted(build_dir.rglob("*.uf2"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not candidates:
-            raise BuildError("Build succeeded but no UF2 file was found.")
-        return candidates[0]
 
     @staticmethod
     def _find_bin(build_dir: Path) -> Path:
