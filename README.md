@@ -25,10 +25,17 @@ OpenPicoKeys provides a 3-step flow:
 ## Requirements
 
 - Python 3.10+
+- `fido2` Python package (for Key Reader tab features)
 - `cmake`
 - `ninja`
 - Pico toolchain required by upstream `pico-fido` build
 - Pico SDK is auto-downloaded and managed by OpenPicoKeys if `PICO_SDK_PATH` is not set
+
+Install Python dependencies with:
+
+```bash
+pip install -r requirements.txt
+```
 
 ## Run
 
@@ -57,7 +64,19 @@ If any are missing, the app prompts once, auto-installs all missing dependencies
 
 ## Key Reader
 
-The `Key Reader` tab is currently a placeholder.
+The `Key Reader` tab supports:
+
+- selecting a connected PicoKey/FIDO authenticator
+- reading authenticator info (including whether a PIN is set)
+- setting a PIN when not already configured
+- reading passkey credential metadata after PIN verification
+- full authenticator reset (destructive) when PIN is forgotten
+
+Notes:
+
+- passkey reading intentionally shows metadata only (RP ID, user fields when available, credential ID summary)
+- private key material is never exposed
+- reset is destructive and requires explicit confirmation
 
 OpenPicoKeys does not require `git`; upstream resources are downloaded as zip archives.
 
