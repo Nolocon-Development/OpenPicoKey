@@ -4,6 +4,7 @@ import json
 import os
 import platform
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -51,7 +52,7 @@ class OpenPicoKeysApp(tk.Tk):
 
         # Customizer state
         self._cust_service = FirmwareCustomizer(
-            log_callback=lambda line: self._post("log", line),
+            log_callback=lambda line: self._post("cust_log", line),
         )
         self._cust_current: FirmwareCustomization | None = None
         self._cust_flat: bytearray | None = None
@@ -64,6 +65,8 @@ class OpenPicoKeysApp(tk.Tk):
         self.cust_website_var = tk.StringVar(value="")
         self.cust_vid_var = tk.StringVar(value="")
         self.cust_pid_var = tk.StringVar(value="")
+        self.cust_board_var = tk.StringVar(value="(scan firmware to detect)")
+        self.cust_disable_led_var = tk.BooleanVar(value=False)
         self.cust_status_var = tk.StringVar(value="Load a UF2 firmware file to begin.")
 
         self._interactive_widgets: list[ttk.Widget] = []
@@ -210,7 +213,7 @@ class OpenPicoKeysApp(tk.Tk):
         )
         firmware_help_btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
-        # ---- Key Customizer tab ----
+        # ---- Key Customizer tab (mirrors Firmware Builder layout) ----
         key_customizer_tab.columnconfigure(0, weight=1)
         key_customizer_tab.rowconfigure(0, weight=1)
 
@@ -221,125 +224,101 @@ class OpenPicoKeysApp(tk.Tk):
 
         cust_subtitle = ttk.Label(
             cust_root,
-            text="Step 1: Select firmware  |  Step 2: Customize descriptors  |  Step 3: Apply changes",
+            text="Step 1: Select firmware  |  Step 2: Customize firmware  |  Step 3: Apply changes",
         )
         cust_subtitle.grid(row=0, column=0, sticky="w", pady=(2, 12))
 
-        src_frame = ttk.LabelFrame(cust_root, text="Step 1 - Source Firmware")
-        src_frame.grid(row=1, column=0, sticky="ew")
-        src_frame.columnconfigure(1, weight=1)
+        cust_source_frame = ttk.LabelFrame(cust_root, text="Step 1 - Source Firmware")
+        cust_source_frame.grid(row=1, column=0, sticky="ew")
+        cust_source_frame.columnconfigure(1, weight=1)
+        cust_source_frame.columnconfigure(3, weight=0)
 
-        ttk.Label(src_frame, text="Input UF2").grid(
-            row=0, column=0, padx=6, pady=6, sticky="w"
-        )
-        cust_input_entry = ttk.Entry(src_frame, textvariable=self.cust_input_var)
+        ttk.Label(cust_source_frame, text="Input UF2").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        cust_input_entry = ttk.Entry(cust_source_frame, textvariable=self.cust_input_var)
         cust_input_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
-        cust_browse_input_btn = ttk.Button(
-            src_frame, text="Browse", command=self._on_cust_browse_input
-        )
-        cust_browse_input_btn.grid(row=0, column=2, padx=6, pady=6)
-        cust_scan_btn = ttk.Button(
-            src_frame, text="Scan UF2", command=self._on_cust_scan
-        )
-        cust_scan_btn.grid(row=0, column=3, padx=6, pady=6)
-        cust_cache_btn = ttk.Button(
-            src_frame, text="From Cache", command=self._on_cust_browse_cache
-        )
-        cust_cache_btn.grid(row=0, column=4, padx=6, pady=6)
+        cust_browse_input_btn = ttk.Button(cust_source_frame, text="Browse", command=self._on_cust_browse_input)
+        cust_browse_input_btn.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+        cust_scan_btn = ttk.Button(cust_source_frame, text="Scan Firmware", command=self._on_cust_scan)
+        cust_scan_btn.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
 
-        desc_frame = ttk.LabelFrame(cust_root, text="Step 2 - Descriptor Customization")
-        desc_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
-        for c in range(4):
-            desc_frame.columnconfigure(c, weight=1)
+        ttk.Label(cust_source_frame, text="Cached builds").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        cust_cache_path_label = ttk.Label(cust_source_frame, text=str(self._cache_dir), foreground="gray")
+        cust_cache_path_label.grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        cust_cache_btn = ttk.Button(cust_source_frame, text="From Cache", command=self._on_cust_browse_cache)
+        cust_cache_btn.grid(row=1, column=2, padx=6, pady=6, sticky="ew")
 
-        ttk.Label(desc_frame, text="Key Name (USB product)").grid(
-            row=0, column=0, padx=6, pady=6, sticky="w"
-        )
-        cust_key_name_entry = ttk.Entry(
-            desc_frame, textvariable=self.cust_key_name_var
-        )
+        cust_profile_frame = ttk.LabelFrame(cust_root, text="Step 2 - Device Customization")
+        cust_profile_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        for col in range(4):
+            cust_profile_frame.columnconfigure(col, weight=1)
+
+        ttk.Label(cust_profile_frame, text="Key Name (USB product)").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        cust_key_name_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_key_name_var)
         cust_key_name_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
-        ttk.Label(desc_frame, text="Manufacturer").grid(
-            row=0, column=2, padx=6, pady=6, sticky="w"
-        )
-        cust_manufacturer_entry = ttk.Entry(
-            desc_frame, textvariable=self.cust_manufacturer_var
-        )
+
+        ttk.Label(cust_profile_frame, text="Manufacturer").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        cust_manufacturer_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_manufacturer_var)
         cust_manufacturer_entry.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
 
-        ttk.Label(desc_frame, text="Website (WebUSB URL)").grid(
-            row=1, column=0, padx=6, pady=6, sticky="w"
-        )
-        cust_website_entry = ttk.Entry(
-            desc_frame, textvariable=self.cust_website_var
-        )
-        cust_website_entry.grid(
-            row=1, column=1, columnspan=3, padx=6, pady=6, sticky="ew"
-        )
+        ttk.Label(cust_profile_frame, text="Website (WebUSB)").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        cust_website_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_website_var)
+        cust_website_entry.grid(row=1, column=1, padx=6, pady=6, sticky="ew")
 
-        ttk.Label(desc_frame, text="USB VID").grid(
-            row=2, column=0, padx=6, pady=6, sticky="w"
-        )
-        cust_vid_entry = ttk.Entry(desc_frame, textvariable=self.cust_vid_var)
+        ttk.Label(cust_profile_frame, text="Board").grid(row=1, column=2, padx=6, pady=6, sticky="w")
+        cust_board_label = ttk.Label(cust_profile_frame, textvariable=self.cust_board_var)
+        cust_board_label.grid(row=1, column=3, padx=6, pady=6, sticky="w")
+
+        ttk.Label(cust_profile_frame, text="USB VID").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        cust_vid_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_vid_var)
         cust_vid_entry.grid(row=2, column=1, padx=6, pady=6, sticky="ew")
-        ttk.Label(desc_frame, text="USB PID").grid(
-            row=2, column=2, padx=6, pady=6, sticky="w"
-        )
-        cust_pid_entry = ttk.Entry(desc_frame, textvariable=self.cust_pid_var)
+
+        ttk.Label(cust_profile_frame, text="USB PID").grid(row=2, column=2, padx=6, pady=6, sticky="w")
+        cust_pid_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_pid_var)
         cust_pid_entry.grid(row=2, column=3, padx=6, pady=6, sticky="ew")
 
-        desc_hint = ttk.Label(
-            desc_frame,
-            text=(
-                "Values pre-filled after scan.  Edit only what you want to change.  "
-                "New strings cannot exceed the length of current firmware values."
-            ),
+        cust_disable_led = ttk.Checkbutton(
+            cust_profile_frame,
+            text="Disable LED  (requires full rebuild)",
+            variable=self.cust_disable_led_var,
+            state="disabled",
+        )
+        cust_disable_led.grid(row=3, column=0, columnspan=2, padx=6, pady=6, sticky="w")
+
+        cust_hint = ttk.Label(
+            cust_profile_frame,
+            text="New string values cannot exceed the length of current firmware values.",
             foreground="gray",
         )
-        desc_hint.grid(
-            row=3, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="w"
-        )
+        cust_hint.grid(row=3, column=2, columnspan=2, padx=6, pady=6, sticky="w")
 
-        ttk.Label(desc_frame, text="Output UF2").grid(
-            row=4, column=0, padx=6, pady=6, sticky="w"
-        )
-        cust_output_entry = ttk.Entry(
-            desc_frame, textvariable=self.cust_output_var
-        )
+        ttk.Label(cust_profile_frame, text="Output UF2").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        cust_output_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_output_var)
         cust_output_entry.grid(row=4, column=1, padx=6, pady=6, sticky="ew")
-        cust_browse_output_btn = ttk.Button(
-            desc_frame, text="Browse", command=self._on_cust_browse_output
-        )
-        cust_browse_output_btn.grid(row=4, column=2, padx=6, pady=6)
+        cust_browse_output_btn = ttk.Button(cust_profile_frame, text="Browse", command=self._on_cust_browse_output)
+        cust_browse_output_btn.grid(row=4, column=2, padx=6, pady=6, sticky="ew")
 
-        cust_action_frame = ttk.Frame(desc_frame)
+        cust_action_frame = ttk.Frame(cust_profile_frame)
         cust_action_frame.grid(row=4, column=3, padx=6, pady=6, sticky="e")
-        cust_load_profile_btn = ttk.Button(
-            cust_action_frame, text="Load Profile", command=self._on_cust_load_profile
-        )
-        cust_load_profile_btn.grid(row=0, column=0, padx=(0, 6))
-        cust_apply_btn = ttk.Button(
-            cust_action_frame, text="Apply Changes", command=self._on_cust_apply
-        )
-        cust_apply_btn.grid(row=0, column=1)
+        cust_save_btn = ttk.Button(cust_action_frame, text="Save Profile", command=self._save_cust_profile)
+        cust_save_btn.grid(row=0, column=0, padx=(0, 6))
+        cust_load_btn = ttk.Button(cust_action_frame, text="Load Profile", command=self._on_cust_load_profile)
+        cust_load_btn.grid(row=0, column=1, padx=(0, 6))
+        cust_apply_btn = ttk.Button(cust_action_frame, text="Apply Changes", command=self._on_cust_apply)
+        cust_apply_btn.grid(row=0, column=2)
 
         cust_logs_frame = ttk.LabelFrame(cust_root, text="Customizer Log")
         cust_logs_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         cust_logs_frame.columnconfigure(0, weight=1)
         cust_logs_frame.rowconfigure(0, weight=1)
 
-        self.cust_logs = scrolledtext.ScrolledText(
-            cust_logs_frame, wrap=tk.WORD, height=20
-        )
+        self.cust_logs = scrolledtext.ScrolledText(cust_logs_frame, wrap=tk.WORD, height=20)
         self.cust_logs.grid(row=0, column=0, sticky="nsew")
         self.cust_logs.configure(state="disabled")
 
         cust_status_frame = ttk.Frame(cust_root)
         cust_status_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         cust_status_frame.columnconfigure(0, weight=1)
-        cust_status_label = ttk.Label(
-            cust_status_frame, textvariable=self.cust_status_var
-        )
+        cust_status_label = ttk.Label(cust_status_frame, textvariable=self.cust_status_var)
         cust_status_label.grid(row=0, column=0, sticky="w")
         cust_quick_install_btn = ttk.Button(
             cust_status_frame, text="\u26a1 Quick Install", command=self._on_quick_install_cust
@@ -373,7 +352,6 @@ class OpenPicoKeysApp(tk.Tk):
             cust_browse_input_btn,
             cust_scan_btn,
             cust_cache_btn,
-            cust_load_profile_btn,
             cust_key_name_entry,
             cust_manufacturer_entry,
             cust_website_entry,
@@ -381,31 +359,29 @@ class OpenPicoKeysApp(tk.Tk):
             cust_pid_entry,
             cust_output_entry,
             cust_browse_output_btn,
+            cust_save_btn,
+            cust_load_btn,
             cust_apply_btn,
             cust_quick_install_btn,
         ]
 
-    def _append_log(self, message: str) -> None:
-        view_before = self.logs.yview()
+    def _append_to_log(self, widget: scrolledtext.ScrolledText, message: str) -> None:
+        """Append *message* to a ScrolledText log widget."""
+        view_before = widget.yview()
         at_bottom = view_before[1] >= 0.999
-        self.logs.configure(state="normal")
-        self.logs.insert(tk.END, message.rstrip() + "\n")
+        widget.configure(state="normal")
+        widget.insert(tk.END, message.rstrip() + "\n")
         if at_bottom:
-            self.logs.see(tk.END)
+            widget.see(tk.END)
         else:
-            self.logs.yview_moveto(view_before[0])
-        self.logs.configure(state="disabled")
+            widget.yview_moveto(view_before[0])
+        widget.configure(state="disabled")
+
+    def _append_log(self, message: str) -> None:
+        self._append_to_log(self.logs, message)
 
     def _append_cust_log(self, message: str) -> None:
-        view_before = self.cust_logs.yview()
-        at_bottom = view_before[1] >= 0.999
-        self.cust_logs.configure(state="normal")
-        self.cust_logs.insert(tk.END, message.rstrip() + "\n")
-        if at_bottom:
-            self.cust_logs.see(tk.END)
-        else:
-            self.cust_logs.yview_moveto(view_before[0])
-        self.cust_logs.configure(state="disabled")
+        self._append_to_log(self.cust_logs, message)
 
     def _post(self, kind: str, payload: object) -> None:
         self._events.put((kind, payload))
@@ -452,15 +428,11 @@ class OpenPicoKeysApp(tk.Tk):
                 widget.state(["disabled"])
             else:
                 widget.state(["!disabled"])
-            if isinstance(widget, ttk.Combobox):
-                if not busy:
-                    widget.configure(state="readonly")
-                continue
+            if isinstance(widget, ttk.Combobox) and not busy:
+                widget.configure(state="readonly")
         if busy:
             self.status_var.set("Working...")
         elif self.status_var.get() == "Working...":
-            self.status_var.set("Ready")
-        if not busy and self.status_var.get() == "Working...":
             self.status_var.set("Ready")
 
     def _start_background(self, worker) -> None:
@@ -622,7 +594,8 @@ class OpenPicoKeysApp(tk.Tk):
     def _cache_uf2(self, source: Path, prefix: str, log_fn) -> Path:
         """Copy *source* into the cache directory with a timestamped name."""
         stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        cached = self._cache_dir / f"{prefix}-{stamp}.uf2"
+        safe_prefix = re.sub(r"[^\w\-]", "_", prefix.strip() or "firmware")
+        cached = self._cache_dir / f"{safe_prefix}-{stamp}.uf2"
         shutil.copy2(source, cached)
         log_fn(f"Cached: {cached.name}")
         return cached
@@ -774,6 +747,7 @@ class OpenPicoKeysApp(tk.Tk):
         self.cust_website_var.set(custom.website)
         self.cust_vid_var.set(f"0x{custom.usb_vid:04X}" if custom.usb_vid else "")
         self.cust_pid_var.set(f"0x{custom.usb_pid:04X}" if custom.usb_pid else "")
+        self.cust_board_var.set(info.board)
 
         # Pre-fill output path
         if not self.cust_output_var.get().strip():
@@ -852,6 +826,34 @@ class OpenPicoKeysApp(tk.Tk):
         self.cust_pid_var.set(profile.usb_pid)
         self.cust_status_var.set(f"Loaded profile values from: {source}")
 
+    def _save_cust_profile(self) -> None:
+        """Save the Key Customizer form values as a profile JSON."""
+        target = filedialog.asksaveasfilename(
+            title="Save customizer profile",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+        )
+        if not target:
+            return
+        data = {
+            "key_name": self.cust_key_name_var.get().strip(),
+            "manufacturer": self.cust_manufacturer_var.get().strip(),
+            "website": self.cust_website_var.get().strip(),
+            "usb_vid": self.cust_vid_var.get().strip(),
+            "usb_pid": self.cust_pid_var.get().strip(),
+            "board": self.cust_board_var.get().strip(),
+            "source_dir": "",
+            "pico_sdk_path": "",
+            "output_uf2": self.cust_output_var.get().strip(),
+            "disable_led": False,
+        }
+        path = Path(target)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        self.cust_status_var.set(f"Profile saved: {path}")
+
     def _on_cust_apply(self) -> None:
         input_path = self.cust_input_var.get().strip()
         output_path = self.cust_output_var.get().strip()
@@ -914,7 +916,6 @@ class OpenPicoKeysApp(tk.Tk):
             self._post("info", f"Optimized firmware saved:\n{out}")
 
         self._start_background(worker)
-
 
     # ------------------------------------------------------------------ #
     #  Quick Install helpers                                                #
@@ -1045,10 +1046,11 @@ class OpenPicoKeysApp(tk.Tk):
         """Return *True* if customizer form values differ from the last apply."""
         if self._last_cust_applied is None:
             return True
-        output_path = self.cust_output_var.get().strip()
+        input_str = self.cust_input_var.get().strip()
+        output_str = self.cust_output_var.get().strip()
         current: dict[str, str | int] = {
-            "input": str(Path(self.cust_input_var.get().strip()).expanduser().resolve()),
-            "output": str(Path(output_path).expanduser().resolve()) if output_path else "",
+            "input": str(Path(input_str).expanduser().resolve()) if input_str else "",
+            "output": str(Path(output_str).expanduser().resolve()) if output_str else "",
             "key_name": self.cust_key_name_var.get().strip(),
             "manufacturer": self.cust_manufacturer_var.get().strip(),
             "website": self.cust_website_var.get().strip(),
