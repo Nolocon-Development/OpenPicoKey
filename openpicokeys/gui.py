@@ -15,8 +15,10 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .builder import BuildError, FirmwareBuilder
-from .models import BuildProfile
 from .customizer import FirmwareCustomization, FirmwareCustomizer, CustomizerError, UF2Info
+from .key_manager import KeyManagerError, KeyManagerService
+from .models import BuildProfile
+from .privilege import admin_required_message, is_admin
 
 
 class OpenPicoKeysApp(tk.Tk):
@@ -69,6 +71,22 @@ class OpenPicoKeysApp(tk.Tk):
         self.cust_disable_led_var = tk.BooleanVar(value=False)
         self.cust_status_var = tk.StringVar(value="Load a UF2 firmware file to begin.")
 
+        # Key Manager state
+        self._is_admin = is_admin()
+        self._km_service = KeyManagerService(
+            log_callback=lambda line: self._post("km_log", line),
+        )
+        self.km_password_var = tk.StringVar(value="")
+        self.km_status_var = tk.StringVar(
+            value=(
+                "Ready."
+                if self._is_admin
+                else admin_required_message("Key Manager")
+            )
+        )
+        self.km_capabilities_var = tk.StringVar(value="Not probed")
+        self._key_manager_widgets: list[ttk.Widget] = []
+
         self._interactive_widgets: list[ttk.Widget] = []
         self._cache_dir = Path.cwd() / ".picokeys" / "builds"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
@@ -96,9 +114,9 @@ class OpenPicoKeysApp(tk.Tk):
         self._notebook = notebook
 
         firmware_tab = ttk.Frame(notebook)
-        key_customizer_tab = ttk.Frame(notebook)
+        key_manager_tab = ttk.Frame(notebook)
         notebook.add(firmware_tab, text="Firmware Builder")
-        notebook.add(key_customizer_tab, text="Key Customizer")
+        notebook.add(key_manager_tab, text="Key Manager")
 
         firmware_tab.columnconfigure(0, weight=1)
         firmware_tab.rowconfigure(0, weight=1)
@@ -213,121 +231,72 @@ class OpenPicoKeysApp(tk.Tk):
         )
         firmware_help_btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
-        # ---- Key Customizer tab (mirrors Firmware Builder layout) ----
-        key_customizer_tab.columnconfigure(0, weight=1)
-        key_customizer_tab.rowconfigure(0, weight=1)
+        # ---- Key Manager tab ----
+        key_manager_tab.columnconfigure(0, weight=1)
+        key_manager_tab.rowconfigure(0, weight=1)
 
-        cust_root = ttk.Frame(key_customizer_tab, padding=8)
-        cust_root.grid(row=0, column=0, sticky="nsew")
-        cust_root.columnconfigure(0, weight=1)
-        cust_root.rowconfigure(3, weight=1)
+        km_root = ttk.Frame(key_manager_tab, padding=8)
+        km_root.grid(row=0, column=0, sticky="nsew")
+        km_root.columnconfigure(0, weight=1)
+        km_root.rowconfigure(3, weight=1)
 
-        cust_subtitle = ttk.Label(
-            cust_root,
-            text="Step 1: Select firmware  |  Step 2: Customize firmware  |  Step 3: Apply changes",
+        km_subtitle = ttk.Label(
+            km_root,
+            text="FIDO-style encrypted backup/restore (capability-gated by firmware)",
         )
-        cust_subtitle.grid(row=0, column=0, sticky="w", pady=(2, 12))
+        km_subtitle.grid(row=0, column=0, sticky="w", pady=(2, 12))
 
-        cust_source_frame = ttk.LabelFrame(cust_root, text="Step 1 - Source Firmware")
-        cust_source_frame.grid(row=1, column=0, sticky="ew")
-        cust_source_frame.columnconfigure(1, weight=1)
-        cust_source_frame.columnconfigure(3, weight=0)
-
-        ttk.Label(cust_source_frame, text="Input UF2").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        cust_input_entry = ttk.Entry(cust_source_frame, textvariable=self.cust_input_var)
-        cust_input_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
-        cust_browse_input_btn = ttk.Button(cust_source_frame, text="Browse", command=self._on_cust_browse_input)
-        cust_browse_input_btn.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
-        cust_scan_btn = ttk.Button(cust_source_frame, text="Scan Firmware", command=self._on_cust_scan)
-        cust_scan_btn.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
-
-        ttk.Label(cust_source_frame, text="Cached builds").grid(row=1, column=0, padx=6, pady=6, sticky="w")
-        cust_cache_path_label = ttk.Label(cust_source_frame, text=str(self._cache_dir), foreground="gray")
-        cust_cache_path_label.grid(row=1, column=1, padx=6, pady=6, sticky="w")
-        cust_cache_btn = ttk.Button(cust_source_frame, text="From Cache", command=self._on_cust_browse_cache)
-        cust_cache_btn.grid(row=1, column=2, padx=6, pady=6, sticky="ew")
-
-        cust_profile_frame = ttk.LabelFrame(cust_root, text="Step 2 - Device Customization")
-        cust_profile_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        km_op_frame = ttk.LabelFrame(km_root, text="Operations")
+        km_op_frame.grid(row=1, column=0, sticky="ew")
         for col in range(4):
-            cust_profile_frame.columnconfigure(col, weight=1)
+            km_op_frame.columnconfigure(col, weight=1)
 
-        ttk.Label(cust_profile_frame, text="Key Name (USB product)").grid(row=0, column=0, padx=6, pady=6, sticky="w")
-        cust_key_name_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_key_name_var)
-        cust_key_name_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        ttk.Label(km_op_frame, text="Encryption password").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        km_password_entry = ttk.Entry(km_op_frame, textvariable=self.km_password_var, show="*")
+        km_password_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
 
-        ttk.Label(cust_profile_frame, text="Manufacturer").grid(row=0, column=2, padx=6, pady=6, sticky="w")
-        cust_manufacturer_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_manufacturer_var)
-        cust_manufacturer_entry.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
+        km_probe_btn = ttk.Button(km_op_frame, text="Probe Device", command=self._on_km_probe)
+        km_probe_btn.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+        km_preview_btn = ttk.Button(km_op_frame, text="Preview Backup", command=self._on_km_preview)
+        km_preview_btn.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
 
-        ttk.Label(cust_profile_frame, text="Website (WebUSB)").grid(row=1, column=0, padx=6, pady=6, sticky="w")
-        cust_website_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_website_var)
-        cust_website_entry.grid(row=1, column=1, padx=6, pady=6, sticky="ew")
+        km_backup_btn = ttk.Button(km_op_frame, text="Backup to Encrypted File", command=self._on_km_backup)
+        km_backup_btn.grid(row=1, column=0, columnspan=2, padx=6, pady=6, sticky="ew")
+        km_restore_btn = ttk.Button(km_op_frame, text="Restore Encrypted Backup", command=self._on_km_restore)
+        km_restore_btn.grid(row=1, column=2, columnspan=2, padx=6, pady=6, sticky="ew")
 
-        ttk.Label(cust_profile_frame, text="Board").grid(row=1, column=2, padx=6, pady=6, sticky="w")
-        cust_board_label = ttk.Label(cust_profile_frame, textvariable=self.cust_board_var)
-        cust_board_label.grid(row=1, column=3, padx=6, pady=6, sticky="w")
-
-        ttk.Label(cust_profile_frame, text="USB VID").grid(row=2, column=0, padx=6, pady=6, sticky="w")
-        cust_vid_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_vid_var)
-        cust_vid_entry.grid(row=2, column=1, padx=6, pady=6, sticky="ew")
-
-        ttk.Label(cust_profile_frame, text="USB PID").grid(row=2, column=2, padx=6, pady=6, sticky="w")
-        cust_pid_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_pid_var)
-        cust_pid_entry.grid(row=2, column=3, padx=6, pady=6, sticky="ew")
-
-        cust_disable_led = ttk.Checkbutton(
-            cust_profile_frame,
-            text="Disable LED  (requires full rebuild)",
-            variable=self.cust_disable_led_var,
-            state="disabled",
+        km_caps_frame = ttk.LabelFrame(km_root, text="Detected Capabilities")
+        km_caps_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        km_caps_frame.columnconfigure(0, weight=1)
+        km_caps_label = ttk.Label(
+            km_caps_frame,
+            textvariable=self.km_capabilities_var,
+            justify="left",
         )
-        cust_disable_led.grid(row=3, column=0, columnspan=2, padx=6, pady=6, sticky="w")
+        km_caps_label.grid(row=0, column=0, padx=8, pady=8, sticky="w")
 
-        cust_hint = ttk.Label(
-            cust_profile_frame,
-            text="New string values cannot exceed the length of current firmware values.",
-            foreground="gray",
-        )
-        cust_hint.grid(row=3, column=2, columnspan=2, padx=6, pady=6, sticky="w")
+        km_logs_frame = ttk.LabelFrame(km_root, text="Key Manager Log")
+        km_logs_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
+        km_logs_frame.columnconfigure(0, weight=1)
+        km_logs_frame.rowconfigure(0, weight=1)
 
-        ttk.Label(cust_profile_frame, text="Output UF2").grid(row=4, column=0, padx=6, pady=6, sticky="w")
-        cust_output_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_output_var)
-        cust_output_entry.grid(row=4, column=1, padx=6, pady=6, sticky="ew")
-        cust_browse_output_btn = ttk.Button(cust_profile_frame, text="Browse", command=self._on_cust_browse_output)
-        cust_browse_output_btn.grid(row=4, column=2, padx=6, pady=6, sticky="ew")
+        self.km_logs = scrolledtext.ScrolledText(km_logs_frame, wrap=tk.WORD, height=20)
+        self.km_logs.grid(row=0, column=0, sticky="nsew")
+        self.km_logs.configure(state="disabled")
 
-        cust_action_frame = ttk.Frame(cust_profile_frame)
-        cust_action_frame.grid(row=4, column=3, padx=6, pady=6, sticky="e")
-        cust_save_btn = ttk.Button(cust_action_frame, text="Save Profile", command=self._save_cust_profile)
-        cust_save_btn.grid(row=0, column=0, padx=(0, 6))
-        cust_load_btn = ttk.Button(cust_action_frame, text="Load Profile", command=self._on_cust_load_profile)
-        cust_load_btn.grid(row=0, column=1, padx=(0, 6))
-        cust_apply_btn = ttk.Button(cust_action_frame, text="Apply Changes", command=self._on_cust_apply)
-        cust_apply_btn.grid(row=0, column=2)
+        km_status_frame = ttk.Frame(km_root)
+        km_status_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        km_status_frame.columnconfigure(0, weight=1)
+        km_status_label = ttk.Label(km_status_frame, textvariable=self.km_status_var)
+        km_status_label.grid(row=0, column=0, sticky="w")
 
-        cust_logs_frame = ttk.LabelFrame(cust_root, text="Customizer Log")
-        cust_logs_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
-        cust_logs_frame.columnconfigure(0, weight=1)
-        cust_logs_frame.rowconfigure(0, weight=1)
-
-        self.cust_logs = scrolledtext.ScrolledText(cust_logs_frame, wrap=tk.WORD, height=20)
-        self.cust_logs.grid(row=0, column=0, sticky="nsew")
-        self.cust_logs.configure(state="disabled")
-
-        cust_status_frame = ttk.Frame(cust_root)
-        cust_status_frame.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        cust_status_frame.columnconfigure(0, weight=1)
-        cust_status_label = ttk.Label(cust_status_frame, textvariable=self.cust_status_var)
-        cust_status_label.grid(row=0, column=0, sticky="w")
-        cust_quick_install_btn = ttk.Button(
-            cust_status_frame, text="\u26a1 Quick Install", command=self._on_quick_install_cust
-        )
-        cust_quick_install_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
-        cust_help_btn = ttk.Button(
-            cust_status_frame, text="How to install firmware", command=self._show_install_help
-        )
-        cust_help_btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
+        self._key_manager_widgets = [
+            km_password_entry,
+            km_probe_btn,
+            km_preview_btn,
+            km_backup_btn,
+            km_restore_btn,
+        ]
 
         self._interactive_widgets = [
             source_entry,
@@ -348,22 +317,13 @@ class OpenPicoKeysApp(tk.Tk):
             load_button,
             build_button,
             quick_install_btn,
-            cust_input_entry,
-            cust_browse_input_btn,
-            cust_scan_btn,
-            cust_cache_btn,
-            cust_key_name_entry,
-            cust_manufacturer_entry,
-            cust_website_entry,
-            cust_vid_entry,
-            cust_pid_entry,
-            cust_output_entry,
-            cust_browse_output_btn,
-            cust_save_btn,
-            cust_load_btn,
-            cust_apply_btn,
-            cust_quick_install_btn,
+            km_password_entry,
+            km_probe_btn,
+            km_preview_btn,
+            km_backup_btn,
+            km_restore_btn,
         ]
+        self._apply_key_manager_admin_gate()
 
     def _append_to_log(self, widget: scrolledtext.ScrolledText, message: str) -> None:
         """Append *message* to a ScrolledText log widget."""
@@ -381,7 +341,11 @@ class OpenPicoKeysApp(tk.Tk):
         self._append_to_log(self.logs, message)
 
     def _append_cust_log(self, message: str) -> None:
-        self._append_to_log(self.cust_logs, message)
+        if hasattr(self, "cust_logs"):
+            self._append_to_log(self.cust_logs, message)
+
+    def _append_km_log(self, message: str) -> None:
+        self._append_to_log(self.km_logs, message)
 
     def _post(self, kind: str, payload: object) -> None:
         self._events.put((kind, payload))
@@ -418,6 +382,12 @@ class OpenPicoKeysApp(tk.Tk):
                 self._append_cust_log(str(payload))
             elif kind == "cust_log":
                 self._append_cust_log(str(payload))
+            elif kind == "km_status":
+                self.km_status_var.set(str(payload))
+            elif kind == "km_log":
+                self._append_km_log(str(payload))
+            elif kind == "km_caps":
+                self._handle_km_caps(payload)
 
         self.after(100, self._drain_events)
 
@@ -434,6 +404,8 @@ class OpenPicoKeysApp(tk.Tk):
             self.status_var.set("Working...")
         elif self.status_var.get() == "Working...":
             self.status_var.set("Ready")
+        if not busy:
+            self._apply_key_manager_admin_gate()
 
     def _start_background(self, worker) -> None:
         if self._worker is not None and self._worker.is_alive():
@@ -443,7 +415,7 @@ class OpenPicoKeysApp(tk.Tk):
         def runner() -> None:
             try:
                 worker()
-            except (BuildError, CustomizerError) as exc:
+            except (BuildError, CustomizerError, KeyManagerError) as exc:
                 self._post("error", str(exc))
             except Exception as exc:  # pragma: no cover
                 detail = f"Unexpected error: {exc}\n\n{traceback.format_exc()}"
@@ -685,6 +657,133 @@ class OpenPicoKeysApp(tk.Tk):
 
         close_btn = ttk.Button(win, text="Close", command=win.destroy)
         close_btn.grid(row=1, column=0, pady=(0, 8))
+
+    def _apply_key_manager_admin_gate(self) -> None:
+        if self._is_admin:
+            return
+        self.km_capabilities_var.set("Unavailable (administrator rights required)")
+        self.km_status_var.set(admin_required_message("Key Manager"))
+        for widget in self._key_manager_widgets:
+            widget.state(["disabled"])
+
+    def _require_key_manager_admin(self) -> bool:
+        if self._is_admin:
+            return True
+        messagebox.showerror("OpenPicoKeys", admin_required_message("Key Manager"))
+        self._apply_key_manager_admin_gate()
+        return False
+
+    @staticmethod
+    def _format_capabilities_text(caps) -> str:
+        return (
+            f"Export supported: {'yes' if caps.export_supported else 'no'}\n"
+            f"Restore supported: {'yes' if caps.restore_supported else 'no'}\n"
+            f"Device ID: {caps.device_id or '(unknown)'}\n"
+            f"Firmware: {caps.firmware_version or '(unknown)'}\n"
+            f"Info: {caps.message or '(none)'}"
+        )
+
+    def _handle_km_caps(self, payload: object) -> None:
+        if payload is None:
+            return
+        self.km_capabilities_var.set(self._format_capabilities_text(payload))
+
+    def _on_km_probe(self) -> None:
+        if not self._require_key_manager_admin():
+            return
+
+        def worker() -> None:
+            self._post("km_status", "Probing device capabilities...")
+            caps = self._km_service.probe_device()
+            self._post("km_caps", caps)
+            self._post("km_status", "Device probe complete")
+
+        self._start_background(worker)
+
+    def _on_km_backup(self) -> None:
+        if not self._require_key_manager_admin():
+            return
+        password = self.km_password_var.get()
+        if not password:
+            messagebox.showerror("OpenPicoKeys", "Enter an encryption password first.")
+            return
+
+        target = filedialog.asksaveasfilename(
+            title="Save encrypted key backup",
+            defaultextension=".okkbak",
+            filetypes=[("OpenPicoKeys backup", "*.okkbak"), ("All files", "*.*")],
+        )
+        if not target:
+            return
+        target_path = Path(target)
+
+        def worker() -> None:
+            self._post("km_status", "Creating encrypted backup...")
+            saved = self._km_service.backup_to_file(target_path, password)
+            self._post("km_status", f"Backup saved: {saved}")
+            self._post("success", f"Encrypted backup created: {saved}")
+            self._post("info", f"Encrypted backup created:\n{saved}")
+
+        self._start_background(worker)
+
+    def _on_km_restore(self) -> None:
+        if not self._require_key_manager_admin():
+            return
+        password = self.km_password_var.get()
+        if not password:
+            messagebox.showerror("OpenPicoKeys", "Enter the backup password first.")
+            return
+
+        source = filedialog.askopenfilename(
+            title="Select encrypted key backup",
+            filetypes=[("OpenPicoKeys backup", "*.okkbak"), ("All files", "*.*")],
+        )
+        if not source:
+            return
+
+        proceed = messagebox.askyesno(
+            "Restore backup",
+            "Restore encrypted backup data to the connected Pico key?\n\n"
+            "This may overwrite existing credential data depending on firmware behavior.",
+        )
+        if not proceed:
+            return
+        source_path = Path(source)
+
+        def worker() -> None:
+            self._post("km_status", "Restoring backup to device...")
+            self._km_service.restore_from_file(source_path, password)
+            self._post("km_status", "Restore complete")
+            self._post("success", "Backup restore completed")
+            self._post("info", "Backup restore completed successfully.")
+
+        self._start_background(worker)
+
+    def _on_km_preview(self) -> None:
+        if not self._require_key_manager_admin():
+            return
+        password = self.km_password_var.get()
+        if not password:
+            messagebox.showerror("OpenPicoKeys", "Enter the backup password first.")
+            return
+
+        source = filedialog.askopenfilename(
+            title="Select encrypted key backup",
+            filetypes=[("OpenPicoKeys backup", "*.okkbak"), ("All files", "*.*")],
+        )
+        if not source:
+            return
+        source_path = Path(source)
+
+        def worker() -> None:
+            self._post("km_status", "Reading backup metadata...")
+            preview = self._km_service.metadata_json(source_path, password)
+            self._post("km_log", "Backup metadata preview:")
+            for line in preview.splitlines():
+                self._post("km_log", line)
+            self._post("km_status", "Backup metadata loaded")
+
+        self._start_background(worker)
 
     def _on_cust_browse_input(self) -> None:
         selected = filedialog.askopenfilename(
