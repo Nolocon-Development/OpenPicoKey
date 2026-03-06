@@ -28,6 +28,7 @@ class OpenPicoKeysApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("OpenPicoKeys")
+        self._apply_app_icon()
         self.geometry("980x760")
         self.minsize(900, 700)
 
@@ -101,6 +102,19 @@ class OpenPicoKeysApp(tk.Tk):
     @staticmethod
     def _default_profile_path() -> Path:
         return Path.cwd() / "profiles" / "default-profile.json"
+
+    @staticmethod
+    def _icon_ico_path() -> Path:
+        return Path.cwd() / "icon.ico"
+
+    def _apply_app_icon(self) -> None:
+        """Apply window/app icon from pre-converted icon.ico."""
+        ico_path = self._icon_ico_path()
+        if ico_path.is_file():
+            try:
+                self.iconbitmap(default=str(ico_path))
+            except tk.TclError:
+                pass
 
     def _autoload_default_customizer_profile(self) -> None:
         """Load profiles/default-profile.json into customizer placeholders when available."""
