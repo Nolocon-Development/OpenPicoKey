@@ -1,3 +1,5 @@
+## DISCLAIMER: THIS PROJECT IS STILL IN DEVELOPMENT. WHILE THE FIRMWARE IS VERY STABLE, THE BACKUPS ARENT HIGH-ENCRYPTED. STORE BACKUPS IN A SAFE PLACE
+
 # OpenPicoKeys
 
 OpenPicoKeys is a lightweight, open-source Tkinter desktop app for building custom Pico FIDO firmware (`.uf2`) from the upstream `pico-fido` + `pico-keys-sdk` sources.
