@@ -14,3 +14,4 @@ dist/
 *.log
 *.uf2
 pico-fido/
+innoSetup/
