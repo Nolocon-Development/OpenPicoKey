@@ -100,12 +100,34 @@ class OpenPicoKeysApp(tk.Tk):
         self.after(300, self._check_dependencies_on_startup)
 
     @staticmethod
-    def _default_profile_path() -> Path:
-        return Path.cwd() / "profiles" / "default-profile.json"
+    def _app_base_dir() -> Path:
+        """Return the directory containing app assets for source and frozen runs."""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).resolve().parent
+        return Path(__file__).resolve().parent.parent
 
-    @staticmethod
-    def _icon_ico_path() -> Path:
-        return Path.cwd() / "icon.ico"
+    @classmethod
+    def _default_profile_path(cls) -> Path:
+        candidates = [
+            cls._app_base_dir() / "profiles" / "default-profile.json",
+            Path.cwd() / "profiles" / "default-profile.json",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return candidates[0]
+
+    @classmethod
+    def _icon_ico_path(cls) -> Path:
+        candidates = [
+            cls._app_base_dir() / "icon.ico",
+            cls._app_base_dir() / "_internal" / "icon.ico",
+            Path.cwd() / "icon.ico",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return candidates[0]
 
     def _apply_app_icon(self) -> None:
         """Apply window/app icon from pre-converted icon.ico."""
