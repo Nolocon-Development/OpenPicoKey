@@ -5,9 +5,12 @@ import os
 import platform
 import queue
 import re
+import secrets
 import shutil
 import sys
+import tempfile
 import threading
+import time
 import traceback
 import tkinter as tk
 from datetime import datetime
@@ -15,7 +18,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from .builder import BuildError, FirmwareBuilder
-from .customizer import FirmwareCustomization, FirmwareCustomizer, CustomizerError, UF2Info
+from .customizer import FirmwareCustomizer, CustomizerError
 from .key_manager import KeyManagerError, KeyManagerService
 from .models import BuildProfile
 from .privilege import admin_required_message, is_admin
@@ -31,6 +34,8 @@ class OpenPicoKeysApp(tk.Tk):
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._busy = False
+        self._bootsel_prompt_event: threading.Event | None = None
+        self._bootsel_prompt_result = False
 
         default_source = str(FirmwareBuilder.default_source_dir())
 
@@ -50,15 +55,13 @@ class OpenPicoKeysApp(tk.Tk):
 
         # Track the profile used for the last successful build / customizer apply
         self._last_built_profile: dict | None = None
+        self._last_cust_build_profile: dict | None = None
         self._last_cust_applied: dict | None = None
 
         # Customizer state
         self._cust_service = FirmwareCustomizer(
             log_callback=lambda line: self._post("cust_log", line),
         )
-        self._cust_current: FirmwareCustomization | None = None
-        self._cust_flat: bytearray | None = None
-        self._cust_info: UF2Info | None = None
 
         self.cust_input_var = tk.StringVar(value="")
         self.cust_output_var = tk.StringVar(value="")
@@ -69,9 +72,9 @@ class OpenPicoKeysApp(tk.Tk):
         self.cust_pid_var = tk.StringVar(value="")
         self.cust_board_var = tk.StringVar(value="(scan firmware to detect)")
         self.cust_disable_led_var = tk.BooleanVar(value=False)
-        self.cust_status_var = tk.StringVar(value="Load a UF2 firmware file to begin.")
+        self.cust_status_var = tk.StringVar(value="Ready for backup, install, and restore.")
 
-        # Key Manager state
+        # Backup Manager state
         self._is_admin = is_admin()
         self._km_service = KeyManagerService(
             log_callback=lambda line: self._post("km_log", line),
@@ -81,7 +84,7 @@ class OpenPicoKeysApp(tk.Tk):
             value=(
                 "Ready."
                 if self._is_admin
-                else admin_required_message("Key Manager")
+                else admin_required_message("Backup Manager")
             )
         )
         self.km_capabilities_var = tk.StringVar(value="Not probed")
@@ -90,9 +93,40 @@ class OpenPicoKeysApp(tk.Tk):
         self._interactive_widgets: list[ttk.Widget] = []
         self._cache_dir = Path.cwd() / ".picokeys" / "builds"
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._autoload_default_customizer_profile()
         self._build_ui()
         self.after(100, self._drain_events)
         self.after(300, self._check_dependencies_on_startup)
+
+    @staticmethod
+    def _default_profile_path() -> Path:
+        return Path.cwd() / "profiles" / "default-profile.json"
+
+    def _autoload_default_customizer_profile(self) -> None:
+        """Load profiles/default-profile.json into customizer placeholders when available."""
+        default_profile = self._default_profile_path()
+        if not default_profile.is_file():
+            return
+        try:
+            payload = json.loads(default_profile.read_text(encoding="utf-8"))
+            profile = BuildProfile.from_dict(payload)
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            # Keep built-in defaults if preset is missing or invalid.
+            return
+
+        self._apply_profile_to_customizer_fields(profile)
+
+    def _apply_profile_to_customizer_fields(self, profile: BuildProfile) -> None:
+        """Apply a BuildProfile to Key Customizer form fields."""
+        self.cust_key_name_var.set(profile.key_name)
+        self.cust_manufacturer_var.set(profile.manufacturer)
+        self.cust_website_var.set(profile.website)
+        self.cust_vid_var.set(profile.usb_vid)
+        self.cust_pid_var.set(profile.usb_pid)
+        self.cust_board_var.set(profile.board)
+        self.cust_disable_led_var.set(profile.disable_led)
+        if not self.cust_output_var.get().strip():
+            self.cust_output_var.set(profile.output_uf2)
 
     def _build_ui(self) -> None:
         root = ttk.Frame(self, padding=12)
@@ -114,9 +148,11 @@ class OpenPicoKeysApp(tk.Tk):
         self._notebook = notebook
 
         firmware_tab = ttk.Frame(notebook)
+        customizer_tab = ttk.Frame(notebook)
         key_manager_tab = ttk.Frame(notebook)
         notebook.add(firmware_tab, text="Firmware Builder")
-        notebook.add(key_manager_tab, text="Key Manager")
+        notebook.add(customizer_tab, text="Firmware Customizer")
+        notebook.add(key_manager_tab, text="Backup Manager")
 
         firmware_tab.columnconfigure(0, weight=1)
         firmware_tab.rowconfigure(0, weight=1)
@@ -231,7 +267,119 @@ class OpenPicoKeysApp(tk.Tk):
         )
         firmware_help_btn.grid(row=0, column=2, sticky="e", padx=(6, 0))
 
-        # ---- Key Manager tab ----
+        # ---- Firmware Customizer tab ----
+        customizer_tab.columnconfigure(0, weight=1)
+        customizer_tab.rowconfigure(0, weight=1)
+
+        cust_root = ttk.Frame(customizer_tab, padding=8)
+        cust_root.grid(row=0, column=0, sticky="nsew")
+        cust_root.columnconfigure(0, weight=1)
+        cust_root.rowconfigure(4, weight=1)
+
+        cust_subtitle = ttk.Label(
+            cust_root,
+            text=(
+                "Step 1: Configure custom values  |  Step 2: Build new firmware  |  "
+                "Step 3: Install with backup restore (no patching)"
+            ),
+        )
+        cust_subtitle.grid(row=0, column=0, sticky="w", pady=(2, 12))
+
+        cust_input_frame = ttk.LabelFrame(cust_root, text="Step 1 - Input Firmware")
+        cust_input_frame.grid(row=1, column=0, sticky="ew")
+        for col in range(4):
+            cust_input_frame.columnconfigure(col, weight=1 if col == 1 else 0)
+
+        ttk.Label(cust_input_frame, text="Input UF2 (optional)").grid(row=0, column=0, padx=6, pady=6, sticky="w")
+        cust_input_entry = ttk.Entry(cust_input_frame, textvariable=self.cust_input_var)
+        cust_input_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        cust_input_browse = ttk.Button(cust_input_frame, text="Browse", command=self._on_cust_browse_input)
+        cust_input_browse.grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+        cust_cache_browse = ttk.Button(cust_input_frame, text="From Cache", command=self._on_cust_browse_cache)
+        cust_cache_browse.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
+
+        ttk.Label(cust_input_frame, text="Backup").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        cust_backup_note = ttk.Label(
+            cust_input_frame,
+            text="Automatic: one-time random password + temporary encrypted backup",
+        )
+        cust_backup_note.grid(row=1, column=1, padx=6, pady=6, sticky="w")
+        cust_scan_button = ttk.Button(cust_input_frame, text="Scan UF2 (optional)", command=self._on_cust_scan)
+        cust_scan_button.grid(row=1, column=2, padx=6, pady=6, sticky="ew")
+
+        cust_profile_frame = ttk.LabelFrame(cust_root, text="Step 2 - Device Customization")
+        cust_profile_frame.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        for col in range(4):
+            cust_profile_frame.columnconfigure(col, weight=1)
+
+        ttk.Label(cust_profile_frame, text="Key Name (USB product)").grid(
+            row=0, column=0, padx=6, pady=6, sticky="w"
+        )
+        cust_key_name_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_key_name_var)
+        cust_key_name_entry.grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+
+        ttk.Label(cust_profile_frame, text="Manufacturer").grid(row=0, column=2, padx=6, pady=6, sticky="w")
+        cust_manufacturer_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_manufacturer_var)
+        cust_manufacturer_entry.grid(row=0, column=3, padx=6, pady=6, sticky="ew")
+
+        ttk.Label(cust_profile_frame, text="Website (WebUSB)").grid(row=1, column=0, padx=6, pady=6, sticky="w")
+        cust_website_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_website_var)
+        cust_website_entry.grid(row=1, column=1, padx=6, pady=6, sticky="ew")
+
+        ttk.Label(cust_profile_frame, text="Board").grid(row=1, column=2, padx=6, pady=6, sticky="w")
+        cust_board_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_board_var, state="readonly")
+        cust_board_entry.grid(row=1, column=3, padx=6, pady=6, sticky="ew")
+
+        ttk.Label(cust_profile_frame, text="USB VID").grid(row=2, column=0, padx=6, pady=6, sticky="w")
+        cust_vid_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_vid_var)
+        cust_vid_entry.grid(row=2, column=1, padx=6, pady=6, sticky="ew")
+
+        ttk.Label(cust_profile_frame, text="USB PID").grid(row=2, column=2, padx=6, pady=6, sticky="w")
+        cust_pid_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_pid_var)
+        cust_pid_entry.grid(row=2, column=3, padx=6, pady=6, sticky="ew")
+
+        cust_disable_led_check = ttk.Checkbutton(
+            cust_profile_frame,
+            text="Disable LED",
+            variable=self.cust_disable_led_var,
+        )
+        cust_disable_led_check.grid(row=3, column=0, columnspan=2, padx=6, pady=6, sticky="w")
+
+        ttk.Label(cust_profile_frame, text="Output UF2").grid(row=4, column=0, padx=6, pady=6, sticky="w")
+        cust_output_entry = ttk.Entry(cust_profile_frame, textvariable=self.cust_output_var)
+        cust_output_entry.grid(row=4, column=1, padx=6, pady=6, sticky="ew")
+        cust_output_browse = ttk.Button(cust_profile_frame, text="Browse", command=self._on_cust_browse_output)
+        cust_output_browse.grid(row=4, column=2, padx=6, pady=6, sticky="ew")
+
+        cust_action_frame = ttk.Frame(cust_profile_frame)
+        cust_action_frame.grid(row=4, column=3, padx=6, pady=6, sticky="e")
+        cust_save_button = ttk.Button(cust_action_frame, text="Save Profile", command=self._save_cust_profile)
+        cust_save_button.grid(row=0, column=0, padx=(0, 6))
+        cust_load_button = ttk.Button(cust_action_frame, text="Load Profile", command=self._on_cust_load_profile)
+        cust_load_button.grid(row=0, column=1, padx=(0, 6))
+
+        cust_logs_frame = ttk.LabelFrame(cust_root, text="Customizer Logs")
+        cust_logs_frame.grid(row=4, column=0, sticky="nsew", pady=(12, 0))
+        cust_logs_frame.columnconfigure(0, weight=1)
+        cust_logs_frame.rowconfigure(0, weight=1)
+
+        self.cust_logs = scrolledtext.ScrolledText(cust_logs_frame, wrap=tk.WORD, height=20)
+        self.cust_logs.grid(row=0, column=0, sticky="nsew")
+        self.cust_logs.configure(state="disabled")
+
+        cust_status_frame = ttk.Frame(cust_root)
+        cust_status_frame.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        cust_status_frame.columnconfigure(0, weight=1)
+        cust_status_label = ttk.Label(cust_status_frame, textvariable=self.cust_status_var)
+        cust_status_label.grid(row=0, column=0, sticky="w")
+        cust_quick_install_btn = ttk.Button(
+            cust_status_frame,
+            text="Apply",
+            command=self._on_quick_install_cust,
+        )
+        cust_quick_install_btn.grid(row=0, column=1, sticky="e", padx=(6, 0))
+
+        # ---- Backup Manager tab ----
         key_manager_tab.columnconfigure(0, weight=1)
         key_manager_tab.rowconfigure(0, weight=1)
 
@@ -275,7 +423,7 @@ class OpenPicoKeysApp(tk.Tk):
         )
         km_caps_label.grid(row=0, column=0, padx=8, pady=8, sticky="w")
 
-        km_logs_frame = ttk.LabelFrame(km_root, text="Key Manager Log")
+        km_logs_frame = ttk.LabelFrame(km_root, text="Backup Manager Log")
         km_logs_frame.grid(row=3, column=0, sticky="nsew", pady=(12, 0))
         km_logs_frame.columnconfigure(0, weight=1)
         km_logs_frame.rowconfigure(0, weight=1)
@@ -317,6 +465,21 @@ class OpenPicoKeysApp(tk.Tk):
             load_button,
             build_button,
             quick_install_btn,
+            cust_input_entry,
+            cust_input_browse,
+            cust_cache_browse,
+            cust_scan_button,
+            cust_key_name_entry,
+            cust_manufacturer_entry,
+            cust_website_entry,
+            cust_vid_entry,
+            cust_pid_entry,
+            cust_disable_led_check,
+            cust_output_entry,
+            cust_output_browse,
+            cust_save_button,
+            cust_load_button,
+            cust_quick_install_btn,
             km_password_entry,
             km_probe_btn,
             km_preview_btn,
@@ -382,6 +545,20 @@ class OpenPicoKeysApp(tk.Tk):
                 self._append_cust_log(str(payload))
             elif kind == "cust_log":
                 self._append_cust_log(str(payload))
+            elif kind == "cust_bootsel_prompt":
+                proceed = messagebox.askokcancel(
+                    "Enable BOOTSEL mode",
+                    "Backup is complete.\n\n"
+                    "Now put your Pico in BOOTSEL mode:\n"
+                    "1. Unplug the Pico\n"
+                    "2. Hold BOOTSEL\n"
+                    "3. Plug it back in while holding BOOTSEL\n"
+                    "4. Release BOOTSEL once RPI-RP2 appears\n\n"
+                    "Press OK to continue installation, or Cancel to abort.",
+                )
+                self._bootsel_prompt_result = proceed
+                if self._bootsel_prompt_event is not None:
+                    self._bootsel_prompt_event.set()
             elif kind == "km_status":
                 self.km_status_var.set(str(payload))
             elif kind == "km_log":
@@ -662,14 +839,14 @@ class OpenPicoKeysApp(tk.Tk):
         if self._is_admin:
             return
         self.km_capabilities_var.set("Unavailable (administrator rights required)")
-        self.km_status_var.set(admin_required_message("Key Manager"))
+        self.km_status_var.set(admin_required_message("Backup Manager"))
         for widget in self._key_manager_widgets:
             widget.state(["disabled"])
 
     def _require_key_manager_admin(self) -> bool:
         if self._is_admin:
             return True
-        messagebox.showerror("OpenPicoKeys", admin_required_message("Key Manager"))
+        messagebox.showerror("OpenPicoKeys", admin_required_message("Backup Manager"))
         self._apply_key_manager_admin_gate()
         return False
 
@@ -710,8 +887,8 @@ class OpenPicoKeysApp(tk.Tk):
 
         target = filedialog.asksaveasfilename(
             title="Save encrypted key backup",
-            defaultextension=".okkbak",
-            filetypes=[("OpenPicoKeys backup", "*.okkbak"), ("All files", "*.*")],
+            defaultextension=".picokeybackup",
+            filetypes=[("OpenPicoKeys backup", "*.picokeybackup"), ("All files", "*.*")],
         )
         if not target:
             return
@@ -736,7 +913,7 @@ class OpenPicoKeysApp(tk.Tk):
 
         source = filedialog.askopenfilename(
             title="Select encrypted key backup",
-            filetypes=[("OpenPicoKeys backup", "*.okkbak"), ("All files", "*.*")],
+            filetypes=[("OpenPicoKeys backup", "*.picokeybackup"), ("All files", "*.*")],
         )
         if not source:
             return
@@ -769,7 +946,7 @@ class OpenPicoKeysApp(tk.Tk):
 
         source = filedialog.askopenfilename(
             title="Select encrypted key backup",
-            filetypes=[("OpenPicoKeys backup", "*.okkbak"), ("All files", "*.*")],
+            filetypes=[("OpenPicoKeys backup", "*.picokeybackup"), ("All files", "*.*")],
         )
         if not source:
             return
@@ -787,7 +964,7 @@ class OpenPicoKeysApp(tk.Tk):
 
     def _on_cust_browse_input(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Select input UF2 firmware",
+            title="Select optional input UF2 firmware",
             filetypes=[("UF2 firmware", "*.uf2"), ("All files", "*.*")],
         )
         if selected:
@@ -805,7 +982,7 @@ class OpenPicoKeysApp(tk.Tk):
 
     def _on_cust_browse_output(self) -> None:
         selected = filedialog.asksaveasfilename(
-            title="Save optimized UF2 firmware",
+            title="Save custom UF2 firmware",
             defaultextension=".uf2",
             filetypes=[("UF2 firmware", "*.uf2"), ("All files", "*.*")],
         )
@@ -815,7 +992,11 @@ class OpenPicoKeysApp(tk.Tk):
     def _on_cust_scan(self) -> None:
         input_path = self.cust_input_var.get().strip()
         if not input_path:
-            messagebox.showerror("OpenPicoKeys", "Select an input UF2 file first.")
+            messagebox.showerror(
+                "OpenPicoKeys",
+                "No input UF2 selected.\n\n"
+                "Input UF2 is optional for Apply/Quick Install, but scanning requires an existing UF2 file.",
+            )
             return
         path = Path(input_path)
         if not path.is_file():
@@ -837,9 +1018,7 @@ class OpenPicoKeysApp(tk.Tk):
         if not isinstance(payload, tuple) or len(payload) != 3:
             return
         flat, info, custom = payload
-        self._cust_flat = flat
-        self._cust_info = info
-        self._cust_current = custom
+        _ = flat
 
         self.cust_key_name_var.set(custom.key_name)
         self.cust_manufacturer_var.set(custom.manufacturer)
@@ -897,32 +1076,7 @@ class OpenPicoKeysApp(tk.Tk):
             messagebox.showerror("OpenPicoKeys", f"Failed to load profile:\n{exc}")
             return
 
-        try:
-            vid = (
-                FirmwareCustomizer.parse_hex_word(profile.usb_vid, "USB VID")
-                if profile.usb_vid.strip()
-                else 0
-            )
-            pid = (
-                FirmwareCustomizer.parse_hex_word(profile.usb_pid, "USB PID")
-                if profile.usb_pid.strip()
-                else 0
-            )
-        except CustomizerError:
-            vid, pid = 0, 0
-
-        self._cust_current = FirmwareCustomization(
-            key_name=profile.key_name,
-            manufacturer=profile.manufacturer,
-            website=profile.website,
-            usb_vid=vid,
-            usb_pid=pid,
-        )
-        self.cust_key_name_var.set(profile.key_name)
-        self.cust_manufacturer_var.set(profile.manufacturer)
-        self.cust_website_var.set(profile.website)
-        self.cust_vid_var.set(profile.usb_vid)
-        self.cust_pid_var.set(profile.usb_pid)
+        self._apply_profile_to_customizer_fields(profile)
         self.cust_status_var.set(f"Loaded profile values from: {source}")
 
     def _save_cust_profile(self) -> None:
@@ -944,7 +1098,7 @@ class OpenPicoKeysApp(tk.Tk):
             "source_dir": "",
             "pico_sdk_path": "",
             "output_uf2": self.cust_output_var.get().strip(),
-            "disable_led": False,
+            "disable_led": self.cust_disable_led_var.get(),
         }
         path = Path(target)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -952,69 +1106,6 @@ class OpenPicoKeysApp(tk.Tk):
             json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         self.cust_status_var.set(f"Profile saved: {path}")
-
-    def _on_cust_apply(self) -> None:
-        input_path = self.cust_input_var.get().strip()
-        output_path = self.cust_output_var.get().strip()
-        if not input_path:
-            messagebox.showerror("OpenPicoKeys", "Select an input UF2 file first.")
-            return
-        if not output_path:
-            messagebox.showerror("OpenPicoKeys", "Select an output UF2 file path.")
-            return
-
-        current = self._cust_current
-        if current is None:
-            messagebox.showerror(
-                "OpenPicoKeys",
-                "Scan the UF2 or load a build profile before applying changes.",
-            )
-            return
-
-        try:
-            new_vid = (
-                FirmwareCustomizer.parse_hex_word(self.cust_vid_var.get(), "USB VID")
-                if self.cust_vid_var.get().strip()
-                else current.usb_vid
-            )
-            new_pid = (
-                FirmwareCustomizer.parse_hex_word(self.cust_pid_var.get(), "USB PID")
-                if self.cust_pid_var.get().strip()
-                else current.usb_pid
-            )
-        except CustomizerError as exc:
-            messagebox.showerror("OpenPicoKeys", str(exc))
-            return
-
-        new = FirmwareCustomization(
-            key_name=self.cust_key_name_var.get().strip() or current.key_name,
-            manufacturer=self.cust_manufacturer_var.get().strip() or current.manufacturer,
-            website=self.cust_website_var.get().strip() or current.website,
-            usb_vid=new_vid,
-            usb_pid=new_pid,
-        )
-
-        inp = Path(input_path)
-        out = Path(output_path)
-
-        def worker() -> None:
-            self._post("cust_log", f"Applying patches to {inp.name} ...")
-            self._post("status", "Applying firmware patches...")
-            self._cust_service.optimize(inp, out, current, new)
-            self._post("cust_log", f"New values:  Product={new.key_name}  Manufacturer={new.manufacturer}")
-            self._post("cust_log", f"  Website={new.website}  VID=0x{new.usb_vid:04X}  PID=0x{new.usb_pid:04X}")
-            self._cache_uf2(out, new.key_name or "customized",
-                            lambda line: self._post("cust_log", line))
-            self._last_cust_applied = {
-                "input": str(inp), "output": str(out),
-                "key_name": new.key_name, "manufacturer": new.manufacturer,
-                "website": new.website, "vid": new.usb_vid, "pid": new.usb_pid,
-            }
-            self._post("cust_status", f"Optimized UF2 saved: {out}")
-            self._post("success", f"Optimized UF2: {out}")
-            self._post("info", f"Optimized firmware saved:\n{out}")
-
-        self._start_background(worker)
 
     # ------------------------------------------------------------------ #
     #  Quick Install helpers                                                #
@@ -1095,6 +1186,31 @@ class OpenPicoKeysApp(tk.Tk):
             return True
         return profile.to_dict() != self._last_built_profile
 
+    def _collect_customizer_build_profile(self) -> BuildProfile:
+        """Collect build settings for Firmware Customizer quick install.
+
+        This path intentionally does not use an input UF2 file.
+        """
+        board = self.cust_board_var.get().strip()
+        if board not in {"pico", "pico2"}:
+            board = self.board_var.get().strip() or "pico"
+
+        profile = BuildProfile(
+            source_dir=self.source_var.get().strip(),
+            pico_sdk_path=self.sdk_var.get().strip(),
+            output_uf2=self.cust_output_var.get().strip() or self.output_var.get().strip(),
+            board=board,
+            key_name=self.cust_key_name_var.get().strip() or self.key_name_var.get().strip(),
+            manufacturer=self.cust_manufacturer_var.get().strip() or self.manufacturer_var.get().strip(),
+            website=self.cust_website_var.get().strip() or self.website_var.get().strip(),
+            usb_vid=self.cust_vid_var.get().strip() or self.usb_vid_var.get().strip(),
+            usb_pid=self.cust_pid_var.get().strip() or self.usb_pid_var.get().strip(),
+            disable_led=self.cust_disable_led_var.get(),
+        )
+        if not profile.source_dir:
+            raise BuildError("Source path is required.")
+        return profile
+
     def _on_quick_install_builder(self) -> None:
         """Build (if needed) and flash the UF2 from the Firmware Builder tab."""
         proceed = messagebox.askyesno(
@@ -1141,70 +1257,123 @@ class OpenPicoKeysApp(tk.Tk):
 
         self._start_background(worker)
 
-    def _cust_settings_changed(self) -> bool:
-        """Return *True* if customizer form values differ from the last apply."""
-        if self._last_cust_applied is None:
-            return True
-        input_str = self.cust_input_var.get().strip()
-        output_str = self.cust_output_var.get().strip()
-        current: dict[str, str | int] = {
-            "input": str(Path(input_str).expanduser().resolve()) if input_str else "",
-            "output": str(Path(output_str).expanduser().resolve()) if output_str else "",
-            "key_name": self.cust_key_name_var.get().strip(),
-            "manufacturer": self.cust_manufacturer_var.get().strip(),
-            "website": self.cust_website_var.get().strip(),
-        }
-        # VID/PID stored as int in snapshot but as string in form — normalise
-        vid_str = self.cust_vid_var.get().strip()
-        pid_str = self.cust_pid_var.get().strip()
-        try:
-            current["vid"] = FirmwareCustomizer.parse_hex_word(vid_str, "VID") if vid_str else 0
-        except CustomizerError:
-            current["vid"] = -1
-        try:
-            current["pid"] = FirmwareCustomizer.parse_hex_word(pid_str, "PID") if pid_str else 0
-        except CustomizerError:
-            current["pid"] = -1
-        return current != self._last_cust_applied
-
     def _on_quick_install_cust(self) -> None:
         """Flash the customized UF2 from the Key Customizer tab."""
-        output_path = self.cust_output_var.get().strip()
-        if not output_path:
-            messagebox.showerror("OpenPicoKeys", "Set an output UF2 path first.")
-            return
-        output = Path(output_path).expanduser().resolve()
-
-        if self._cust_settings_changed():
-            # Descriptor values changed — need to re-apply before installing
-            re_apply = messagebox.askyesno(
-                "OpenPicoKeys",
-                "Customization settings have changed since the last Apply.\n\n"
-                "Apply the new changes and then install?",
-            )
-            if not re_apply:
-                return
-            # Trigger apply; user will need to Quick Install again after
-            self._on_cust_apply()
+        if not self._require_key_manager_admin():
             return
 
-        if not output.is_file():
-            messagebox.showerror(
-                "OpenPicoKeys",
-                f"Output UF2 not found:\n{output}\n\n"
-                "Apply changes first to generate the customized firmware.",
-            )
+        try:
+            profile = self._collect_customizer_build_profile()
+        except BuildError as exc:
+            messagebox.showerror("OpenPicoKeys", str(exc))
             return
+
+        output = profile.output_path_or_default(profile.board)
 
         def worker() -> None:
             log = lambda line: self._post("cust_log", line)  # noqa: E731
-            self._post("status", "Installing firmware to Pico...")
-            self._copy_uf2_to_pico(output, log)
-            self._post("cust_status", "Firmware installed!")
-            self._post("success", "Firmware installed!")
-            self._post("info", "Firmware installed successfully!\nThe Pico will reboot momentarily.")
+
+            password = secrets.token_urlsafe(32)
+            backup_dir = Path(tempfile.gettempdir()) / "openpicokeys"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            backup_path = backup_dir / f"customizer-auto-backup-{stamp}.picokeybackup"
+            saved_backup: Path | None = None
+            restored = False
+
+            self._post("status", "Creating encrypted backup before install...")
+            caps = self._km_service.probe_device()
+            if not caps.export_supported or not caps.restore_supported:
+                raise KeyManagerError(
+                    caps.message
+                    or "Device must support both backup export and restore import for customizer quick install."
+                )
+
+            try:
+                saved_backup = self._km_service.backup_to_file(backup_path, password)
+                log("Temporary encrypted backup created.")
+
+                log("Building new firmware for customizer install (no patching)...")
+                self._post("status", "Building firmware for customizer install...")
+                builder = FirmwareBuilder(log_callback=log)
+                result = builder.build(profile)
+                output = result.output_uf2
+                self._last_cust_build_profile = profile.to_dict()
+                self._cache_uf2(output, profile.key_name or "customizer", log)
+                log(f"Build complete: {output}")
+
+                self._wait_for_bootsel_confirmation(log)
+
+                try:
+                    self._post("status", "Installing firmware to Pico...")
+                    self._copy_uf2_to_pico(output, log)
+                except Exception as exc:
+                    raise BuildError(
+                        "Firmware copy failed after backup was created.\n\n"
+                        f"Temporary backup file: {saved_backup}\n"
+                        "You can restore it manually from the Backup Manager tab.\n"
+                        f"Generated backup password: {password}\n\n"
+                        f"Details: {exc}"
+                    ) from exc
+
+                self._post("status", "Restoring backup after install...")
+                assert saved_backup is not None
+                self._restore_backup_with_retry(saved_backup, password, log)
+                restored = True
+                self._post("cust_status", "Firmware installed and backup restored!")
+                self._post("success", "Firmware installed and data restored")
+                self._post(
+                    "info",
+                    "Firmware installed successfully and credential backup restored.",
+                )
+            finally:
+                if saved_backup is not None and saved_backup.exists() and restored:
+                    try:
+                        saved_backup.unlink()
+                        log("Temporary backup file removed.")
+                    except OSError:
+                        log(f"Warning: could not remove temporary backup file: {saved_backup}")
 
         self._start_background(worker)
+
+    def _wait_for_bootsel_confirmation(self, log_fn) -> None:
+        """Prompt the user to enter BOOTSEL mode and block until they confirm/cancel."""
+        evt = threading.Event()
+        self._bootsel_prompt_event = evt
+        self._bootsel_prompt_result = False
+        self._post("cust_bootsel_prompt", "")
+        log_fn("Waiting for user to enable BOOTSEL mode...")
+        evt.wait()
+        self._bootsel_prompt_event = None
+        if not self._bootsel_prompt_result:
+            raise BuildError("Installation canceled by user before BOOTSEL install step.")
+
+    def _restore_backup_with_retry(self, source: Path, password: str, log_fn) -> None:
+        """Restore backup after firmware flash, retrying while the device reconnects."""
+        attempts = 15
+        delay_s = 2.0
+        last_error: KeyManagerError | None = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                self._km_service.restore_from_file(source, password)
+                log_fn(f"Backup restored from: {source}")
+                return
+            except KeyManagerError as exc:
+                last_error = exc
+                if attempt < attempts:
+                    log_fn(
+                        f"Restore attempt {attempt}/{attempts} not ready yet: {exc}"
+                    )
+                    time.sleep(delay_s)
+                    continue
+
+        raise KeyManagerError(
+            "Firmware was installed, but automatic restore failed after multiple retries.\n\n"
+            f"Backup file is safe at: {source}\n"
+            "You can restore it manually from the Backup Manager tab once the key is ready.\n\n"
+            f"Last error: {last_error}"
+        )
 
 
 def run() -> None:

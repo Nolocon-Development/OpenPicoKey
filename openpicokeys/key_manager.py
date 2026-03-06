@@ -10,7 +10,7 @@ from .crypto_backup import BackupCryptoError, decrypt_backup, encrypt_backup
 
 
 class KeyManagerError(RuntimeError):
-    """Raised when a key manager operation fails."""
+    """Raised when a backup manager operation fails."""
 
 
 @dataclass(frozen=True)
@@ -172,7 +172,7 @@ class PicoKeyFidoTransport(DeviceTransport):
             from fido2.hid import CtapHidDevice  # type: ignore
         except Exception as exc:
             raise KeyManagerError(
-                "Missing dependency: python-fido2 is required for Key Manager transport."
+                "Missing dependency: python-fido2 is required for Backup Manager transport."
             ) from exc
 
         self._fido_cbor = fido_cbor

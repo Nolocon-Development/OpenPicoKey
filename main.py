@@ -35,6 +35,6 @@ if __name__ == "__main__":
         if relaunched:
             raise SystemExit(0)
         # UAC prompt denied or failed: stop startup to keep admin-only behavior consistent.
-        raise SystemExit("Administrator privileges are required. Relaunch with --no_uac to skip UAC request.")
+        raise SystemExit("Administrator privileges are required. Relaunch with --noUAC to skip UAC request.")
 
     run()
